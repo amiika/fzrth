@@ -15,12 +15,22 @@
     <template id="template">
         <script id="processor">
 
+        const SUB = Symbol('SUB');
+        const CYC = Symbol('CYC');
+        const CHO = Symbol('CHO');
+
         const DICT = {
             'sine': (c) => createSound(c, 'SINE'),
             'tri':  (c) => createSound(c, 'TRI'),
             'saw':  (c) => createSound(c, 'SAW'),
             'sqr':  (c) => createSound(c, 'SQR'),
-            'bpm':  (c) => { if (c.stack.length > 0) c.bpm = c.stack.pop(); }
+            'bpm':  (c) => { if (c.stack.length > 0) c.bpm = c.stack.pop(); },
+            '[': (c) => c.stack.push(SUB),
+            ']': (c) => closeGroup(c, SUB),
+            '<': (c) => c.stack.push(CYC),
+            '>': (c) => closeGroup(c, CYC),
+            '(': (c) => c.stack.push(CHO), 
+            ')': (c) => closeGroup(c, CHO)
         };
 
         const WAVES = {
@@ -31,13 +41,61 @@
         };
 
         function createSound(c, type) {
-            if (c.stack.length > 0) {
-                c.newSounds.push({
-                    freqs: [...c.stack], 
-                    render: WAVES[type],
-                    phase: 0
-                });
-                c.stack.length = 0;
+            if (c.stack.length === 0) return;
+            let pattern;
+            if (c.stack.length > 1) {
+                pattern = { type: SUB, data: [...c.stack] };
+            } else {
+                pattern = c.stack[0];
+            }
+            c.newSounds.push(new Sound(pattern, type));
+            c.stack.length = 0;
+        }
+
+        function closeGroup(c, marker) {
+            const tmp = [];
+            while (c.stack.length > 0) {
+                const item = c.stack.pop();
+                if (item === marker) {
+                    c.stack.push({ type: marker, data: tmp.reverse(), idx: 0 });
+                    return;
+                }
+                tmp.push(item);
+            }
+        }
+
+        class Sound {
+            constructor(pattern, wave) {
+                this.pattern = pattern;
+                this.render = WAVES[wave];
+                this.phase = 0;
+                this.currFreqs = [];
+                this.endTime = -1;
+                this.iter = this.makeIterator();
+            }
+
+            *makeIterator() { while (true) yield* this.visit(this.pattern, 1.0); }
+
+            *visit(node, duration) {
+                if (typeof node === 'number') {
+                    yield { freqs: [node], dur: duration };
+                } else if (node?.type === CHO) {
+                    const freqs = node.data.flatMap(child => this.collectFreqs(child));
+                    yield { freqs: freqs, dur: duration };
+                } else if (node?.type === SUB) {
+                    const step = duration / node.data.length;
+                    for (const item of node.data) yield* this.visit(item, step);
+                } else if (node?.type === CYC) {
+                    const item = node.data[node.idx++ % node.data.length];
+                    yield* this.visit(item, duration);
+                }
+            }
+
+            collectFreqs(node) {
+                if (typeof node === 'number') return [node];
+                if (node?.type === CHO || node?.type === SUB) return node.data.flatMap(n => this.collectFreqs(n));
+                if (node?.type === CYC) return this.collectFreqs(node.data[node.idx % node.data.length]);
+                return [];
             }
         }
 
@@ -53,18 +111,17 @@
             }
 
             compile(text) {
-                const tokens = text.split(/\s+/).filter(x => x);
+                const tokens = text.replace(/[\[\]<>()]/g, ' $& ')
+                .split(/\s+/).filter(x => x);
+
                 this.stack = [];
                 this.newSounds = [];
 
                 tokens.forEach(t => {
                     const num = parseFloat(t);
-                    if (!isNaN(num)) {
-                        this.stack.push(num);
-                    } else if (DICT[t]) {
-                        DICT[t](this); 
-                    }
-                });
+                    if (!isNaN(num)) this.stack.push(num);
+                    else if (DICT[t]) DICT[t](this);
+                });    
                 this.sounds = this.newSounds;
             }
 
@@ -73,20 +130,26 @@
                 if (!output) return true;
 
                 const delta = 1 / sampleRate;
-                const duration = 60 / this.bpm;
+                const duration = (this.bpm / 60) * delta;
 
                 for (let i = 0; i < output.length; i++) {
-                    this.beats += delta;
-                    if (this.beats >= duration) this.beats = 0;
-
+                    this.beats += duration;
                     let signal = 0;
                     this.sounds.forEach(v => {
-                        if (v.freqs.length === 0) return;
-                        const step = duration / v.freqs.length;
-                        const noteId = Math.floor(this.beats / step);
-                        const freq = v.freqs[noteId];
-                        v.phase += (freq * delta);
-                        signal += v.render(v.phase);
+                        if (v.endTime < 0) v.endTime = this.beats;
+
+                        while (this.beats >= v.endTime) {
+                            const result = v.iter.next();
+                            v.currFreqs = result.value.freqs;
+                            v.endTime += result.value.dur; 
+                        }
+
+                        v.currFreqs.forEach(f => {
+                            if (f > 0) {
+                                v.phase += (f * delta);
+                                signal += v.render(v.phase);
+                            }
+                        });
                     });
                     output[i] = signal * 0.15;
                 }

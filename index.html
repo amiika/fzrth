@@ -25,12 +25,13 @@
             'saw':  (c) => createSound(c, 'SAW'),
             'sqr':  (c) => createSound(c, 'SQR'),
             'bpm':  (c) => { if (c.stack.length > 0) c.bpm = c.stack.pop(); },
-            '[': (c) => c.stack.push(SUB),
-            ']': (c) => closeGroup(c, SUB),
-            '<': (c) => c.stack.push(CYC),
-            '>': (c) => closeGroup(c, CYC),
-            '(': (c) => c.stack.push(CHO), 
-            ')': (c) => closeGroup(c, CHO)
+            '[':    (c) => c.stack.push(SUB),
+            ']':    (c) => closeGroup(c, SUB),
+            '<':    (c) => c.stack.push(CYC),
+            '>':    (c) => closeGroup(c, CYC),
+            '(':    (c) => c.stack.push(CHO), 
+            ')':    (c) => closeGroup(c, CHO),
+            ':':    (c) => defineWord(c),
         };
 
         const WAVES = {
@@ -40,14 +41,34 @@
             'SQR':  (p) => (p % 1) < 0.5 ? 0.5 : -0.5
         };
 
+        function defineWord(c) {
+            const name = c.tokens[c.pos++];
+            const body = [];
+            while (c.pos < c.tokens.length) {
+                const t = c.tokens[c.pos++];
+                if (t === ';') break;
+                body.push(t);
+            }
+            c.dict[name] = (ctx) => {
+                const savedTokens = ctx.tokens, savedPos = ctx.pos;
+                ctx.tokens = body; ctx.pos = 0;
+                run(ctx);
+                ctx.tokens = savedTokens; ctx.pos = savedPos;
+            };
+        }
+
+        function run(c) {
+            while (c.pos < c.tokens.length) {
+                const t = c.tokens[c.pos++];
+                const num = parseFloat(t);
+                if (!isNaN(num)) c.stack.push(num);
+                else if (c.dict[t]) c.dict[t](c);
+            }
+        }
+
         function createSound(c, type) {
             if (c.stack.length === 0) return;
-            let pattern;
-            if (c.stack.length > 1) {
-                pattern = { type: SUB, data: [...c.stack] };
-            } else {
-                pattern = c.stack[0];
-            }
+            let pattern = c.stack.length > 1 ? { type: SUB, data: [...c.stack] } : c.stack[0];
             c.newSounds.push(new Sound(pattern, type));
             c.stack.length = 0;
         }
@@ -77,18 +98,12 @@
             *makeIterator() { while (true) yield* this.visit(this.pattern, 1.0); }
 
             *visit(node, duration) {
-                if (typeof node === 'number') {
-                    yield { freqs: [node], dur: duration };
-                } else if (node?.type === CHO) {
-                    const freqs = node.data.flatMap(child => this.collectFreqs(child));
-                    yield { freqs: freqs, dur: duration };
-                } else if (node?.type === SUB) {
+                if (typeof node === 'number') yield { freqs: [node], dur: duration };
+                else if (node?.type === CHO) yield { freqs: node.data.flatMap(n => this.collectFreqs(n)), dur: duration };
+                else if (node?.type === SUB) {
                     const step = duration / node.data.length;
                     for (const item of node.data) yield* this.visit(item, step);
-                } else if (node?.type === CYC) {
-                    const item = node.data[node.idx++ % node.data.length];
-                    yield* this.visit(item, duration);
-                }
+                } else if (node?.type === CYC) yield* this.visit(node.data[node.idx++ % node.data.length], duration);
             }
 
             collectFreqs(node) {
@@ -103,47 +118,54 @@
             constructor() {
                 super();
                 this.sounds = [];
-                this.newSounds = [];
-                this.stack = [];
+                this.pending = null; 
                 this.bpm = 120;
                 this.beats = 0;
                 this.port.onmessage = (e) => this.compile(e.data);
             }
 
             compile(text) {
-                const tokens = text.replace(/[\[\]<>()]/g, ' $& ')
+                const tokens = text.replace(/[\[\]<>() :;]/g, ' $& ')
                 .split(/\s+/).filter(x => x);
 
-                this.stack = [];
-                this.newSounds = [];
+                const ctx = {
+                    tokens, pos: 0, stack: [], newSounds: [],
+                    dict: Object.assign({}, DICT), bpm: this.bpm
+                };
 
-                tokens.forEach(t => {
-                    const num = parseFloat(t);
-                    if (!isNaN(num)) this.stack.push(num);
-                    else if (DICT[t]) DICT[t](this);
-                });    
-                this.sounds = this.newSounds;
+                run(ctx);
+
+                if (ctx.stack.length === 0) {
+                    this.pending = { sounds: ctx.newSounds, bpm: ctx.bpm };
+                }
             }
 
             process(inputs, outputs) {
                 const output = outputs[0][0];
                 if (!output) return true;
-
                 const delta = 1 / sampleRate;
                 const duration = (this.bpm / 60) * delta;
 
                 for (let i = 0; i < output.length; i++) {
+                    const prevBeat = Math.floor(this.beats);
                     this.beats += duration;
+                    const nextBeat = Math.floor(this.beats);
+
+                    // Sync to beat changes
+                    if (this.pending && (nextBeat > prevBeat || this.sounds.length === 0)) {
+                        this.sounds = this.pending.sounds;
+                        this.bpm = this.pending.bpm;
+                        this.pending = null;
+                    }
+
                     let signal = 0;
                     this.sounds.forEach(v => {
                         if (v.endTime < 0) v.endTime = this.beats;
-
                         while (this.beats >= v.endTime) {
                             const result = v.iter.next();
                             v.currFreqs = result.value.freqs;
                             v.endTime += result.value.dur; 
                         }
-
                         v.currFreqs.forEach(f => {
                             if (f > 0) {
                                 v.phase += (f * delta);

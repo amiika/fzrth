@@ -32,6 +32,7 @@
             '(':    (c) => c.stack.push(CHO), 
             ')':    (c) => closeGroup(c, CHO),
             ':':    (c) => defineWord(c),
+            'midi': (c) => { c.isMidi = true; },
         };
 
         const WAVES = {
@@ -66,8 +67,24 @@
             }
         }
 
+        // MIDI to HZ: f = 440 * 2^((n-69)/12)
+        const midiToFreq = (n) => n === 0 ? 0 : 440 * Math.pow(2, (n - 69) / 12);
+
         function createSound(c, type) {
             if (c.stack.length === 0) return;
+
+            if (c.isMidi) {
+                c.stack = c.stack.map(item => {
+                    if (typeof item === 'object') {
+                        item.val = midiToFreq(item.val);
+                        return item;
+                    }
+                    return midiToFreq(item);
+                });
+
+                c.isMidi = false; 
+            }
+
             let pattern = c.stack.length > 1 ? { type: SUB, data: [...c.stack] } : c.stack[0];
             c.newSounds.push(new Sound(pattern, type));
             c.stack.length = 0;

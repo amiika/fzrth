@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>FZRTH</title>
+    <style>
+        body { background: #000; color: #fb0; font-family: monospace; display: flex; flex-direction: column; height: 100vh; margin: 0; }
+        #editor { flex: 1; background: #000; color: #fb0; border: none; padding: 20px; font-size: 20px; outline: none; resize: none;}
+        .header { font-size: 24px; padding: 10px; border-bottom: 1px solid #fb0; text-align: left; background: #111;}
+    </style>
+</head>
+<body>
+    <div class="header">FZRTH</div>
+
+    <textarea id="editor" spellcheck="false">100 200 300 400 sine</textarea>
+
+    <template id="template">
+        <script id="processor">
+            
+        const DICT = {
+            'sine': (stack, sounds) => {
+            if (stack.length > 0) {
+                sounds.push({
+                    freqs: [...stack],
+                    wave: 'sine',
+                    phase: 0
+                });
+                stack.length = 0;
+            }
+        }
+    };
+
+    class ForthProcessor extends AudioWorkletProcessor {
+        constructor() {
+            super();
+            this.sounds = [];
+            this.bpm = 120;
+            this.beats = 0;
+            this.port.onmessage = (e) => this.compile(e.data);
+        }
+
+        compile(text) {
+            const tokens = text.split(/\s+/).filter(x => x);
+            const stack = [];
+            const newSounds = [];
+
+            tokens.forEach(t => {
+                const num = parseFloat(t);
+                if (!isNaN(num)) {
+                    stack.push(num);
+                } else if (DICT[t]) {
+                    DICT[t](stack, newSounds);
+                }
+            });
+            
+            this.sounds = newSounds;
+        }
+
+        process(inputs, outputs) {
+            const output = outputs[0][0];
+            if (!output) return true;
+
+            const delta = 1 / sampleRate;
+            const duration = 60 / this.bpm;
+
+            for (let i = 0; i < output.length; i++) {
+                this.beats += delta;
+                if (this.beats >= duration) this.beats = 0;
+
+                let signal = 0;
+                this.sounds.forEach(v => {
+                    if (v.freqs.length === 0) return;
+                    
+                    const step = duration / v.freqs.length;
+                    const noteId = Math.floor(this.beats / step);
+                    const freq = v.freqs[noteId];
+                    
+                    v.phase += (freq * delta);
+                    signal += Math.sin(v.phase * 2 * Math.PI);      
+                });
+
+                output[i] = signal * 0.2;
+            }
+            return true;
+        }
+    }
+    registerProcessor('forth-proc', ForthProcessor);
+    </script>
+</template>
+
+<script>
+    const editor = document.getElementById('editor');
+    let audioCtx;
+    let node;
+
+    async function init() {
+        if (audioCtx) return;
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        
+        const template = document.getElementById('template');
+        const code = template.content.getElementById('processor').textContent;
+        
+        const blob = new Blob([code], {type: 'application/javascript'});
+        const url = URL.createObjectURL(blob);
+        await audioCtx.audioWorklet.addModule(url);
+
+        node = new AudioWorkletNode(audioCtx, 'forth-proc');
+        node.connect(audioCtx.destination);
+
+        editor.addEventListener('input', () => node.port.postMessage(editor.value));
+        node.port.postMessage(editor.value);
+    }
+
+    document.addEventListener('click', init, { once: true });
+</script>
+</body>
+</html>

@@ -20,10 +20,11 @@
 </head>
 <body>
     <div class="header">FZRTH</div>
-        
     <div class="container">
         <div id="highlight"></div>
-        <textarea id="editor" spellcheck="false">100 200 400 800 [800 600] sine</textarea>
+        <textarea id="editor" spellcheck="false"># Comments & Math Highlighting
+<100 200> 50 + sine
+[500 1000] rand * saw</textarea>
     </div>
 
     <template id="template">
@@ -47,6 +48,52 @@
             ')':    (c) => closeGroup(c, CHO),
             ':':    (c) => defineWord(c),
             'midi': (c) => { c.isMidi = true; },
+            '+':    (c, t) => calc(c, t, (a, b) => a + b),
+            '-':    (c, t) => calc(c, t, (a, b) => a - b),
+            '*':    (c, t) => calc(c, t, (a, b) => a * b),
+            '/':    (c, t) => calc(c, t, (a, b) => a / b),
+            '%':    (c, t) => calc(c, t, (a, b) => a % b),
+            'pow':  (c, t) => calc(c, t, Math.pow),
+            'min':  (c, t) => calc(c, t, Math.min),
+            'max':  (c, t) => calc(c, t, Math.max),
+            'sin':  (c, t) => calc(c, t, Math.sin),
+            'cos':  (c, t) => calc(c, t, Math.cos),
+            'tan':  (c, t) => calc(c, t, Math.tan),
+            'abs':  (c, t) => calc(c, t, Math.abs),
+            'sqrt': (c, t) => calc(c, t, Math.sqrt),
+            'log':  (c, t) => calc(c, t, Math.log),
+            'rand': (c, t) => c.stack.push({ val: Math.random(), ranges: [t] }),
+            'pi':   (c, t) => c.stack.push({ val: Math.PI, ranges: [t] }),
+        };
+
+        const calc = (c, opToken, fn) => {
+            if (c.stack.length < fn.length) return;
+            
+            const args = [];
+            for(let i=0; i<fn.length; i++) args.unshift(c.stack.pop());
+            
+            const getR = (x) => x.ranges || [x];
+
+            const deep = (a, b) => {
+                if (b !== undefined) {
+                    if (a.data) return { ...a, data: a.data.map(i => deep(i, b)) };
+                    if (b.data) return { ...b, data: b.data.map(i => deep(a, i)) };
+                    
+                    return { 
+                        val: fn(a.val, b.val), 
+                        ranges: [opToken, ...getR(a), ...getR(b)]
+                    };
+                }
+
+                if (a.data) return { ...a, data: a.data.map(i => deep(i)) };
+                
+                return { 
+                    val: fn(a.val), 
+                    ranges: [opToken, ...getR(a)]
+                };
+            };
+            
+            c.stack.push(deep(args[0], args[1]));
         };
 
         const WAVES = {
@@ -78,7 +125,7 @@
                 const t = c.tokens[c.pos++];
                 const num = parseFloat(t.val);
                 if (!isNaN(num)) c.stack.push({ val: num, s: t.s, e: t.e });
-                else if (c.dict[t.val]) c.dict[t.val](c);
+                else if (c.dict[t.val]) c.dict[t.val](c, t);
             }
         }
 
@@ -125,7 +172,7 @@
                 this.pattern = pattern;
                 this.waveType = waveType;
                 this.render = WAVES[waveType];
-                this.signature = JSON.stringify(pattern, (k, v) => (k==='s'||k==='e'||k==='idx') ? undefined : v) + ':' + waveType;
+                this.signature = JSON.stringify(pattern, (k, v) => (k==='s'||k==='e'||k==='idx'||k==='ranges') ? undefined : v) + ':' + waveType;
                 this.phase = 0;
                 this.currFreqs = [];
                 this.currRanges = []; 
@@ -136,13 +183,15 @@
             *makeIterator() { while (true) yield* this.visit(this.pattern, 1.0); }
 
             *visit(node, duration) {
-                if (node.val !== undefined) yield { freqs: [node.val], ranges: [node], dur: duration };
+                const ranges = node.ranges || (node.val !== undefined ? [node] : []);
+                
+                if (node.val !== undefined) yield { freqs: [node.val], ranges: ranges, dur: duration };
                 
                 else if (node?.type === CHO) {
                     const data = node.data.flatMap(n => this.collect(n));
                     yield { 
                         freqs: data.map(d => d.val), 
-                        ranges: data, 
+                        ranges: data.flatMap(d => d.ranges || [d]), 
                         dur: duration 
                     };
                 }
@@ -178,7 +227,8 @@
                 const regex = /[^\s\[\]<>() :;]+|[\[\]<>() :;]/g;
                 let m;
                 while ((m = regex.exec(text)) !== null) {
-                    if (!m[0].trim()) continue; 
+                    if (!m[0].trim()) continue;
+                    if (m[0].startsWith('#')) continue;
                     tokens.push({ val: m[0], s: m.index, e: m.index + m[0].length });
                 }
 
@@ -224,7 +274,6 @@
                     let signal = 0;
 
                     this.sounds.forEach(v => {
-        
                         if (v.endTime < 0) v.endTime = Math.floor(this.beats);
 
                         while (this.beats >= v.endTime) {
@@ -274,7 +323,7 @@
         const map = new Set();
         ranges.forEach(r => {
             const k = r.s + ":" + r.e;
-            if(!map.has(k)) { map.add(k); unique.push(r); }
+            if(!map.has(k) && r.e > 0) { map.add(k); unique.push(r); }
         });
         unique.sort((a,b) => a.s - b.s);
 

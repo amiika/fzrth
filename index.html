@@ -22,9 +22,14 @@
     <div class="header">FZRTH</div>
     <div class="container">
         <div id="highlight"></div>
-        <textarea id="editor" spellcheck="false"># Comments & Math Highlighting
-<100 200> 50 + sine
-[500 1000] rand * saw</textarea>
+        <textarea id="editor" spellcheck="false">
+: foo 100 200 irand ;
+: bar 100 foo irand ;
+
+[100 150 foo bar] [foo foo foo] saw
+
+# Random cutoff filter effect
+t [10 <15 23>] 10 666 irand + * sin <24 65 24> 100 * * sine</textarea>
     </div>
 
     <template id="template">
@@ -35,11 +40,11 @@
         const CHO = 'CHO';
 
         const DICT = {
-            'sine': (c) => createSound(c, 'SINE'),
-            'tri':  (c) => createSound(c, 'TRI'),
-            'saw':  (c) => createSound(c, 'SAW'),
-            'sqr':  (c) => createSound(c, 'SQR'),
-            'bpm':  (c) => { if (c.stack.length > 0) c.bpm = c.stack.pop().val; },
+            'sine': (c) => compile(c, 'SINE'),
+            'tri':  (c) => compile(c, 'TRI'),
+            'saw':  (c) => compile(c, 'SAW'),
+            'sqr':  (c) => compile(c, 'SQR'),
+            'bpm':  (c) => { if (c.stack.length > 0) c.bpm = resolve(c.stack.pop(), {beat:0}); },
             '[':    (c) => c.stack.push(SUB),
             ']':    (c) => closeGroup(c, SUB),
             '<':    (c) => c.stack.push(CYC),
@@ -62,39 +67,73 @@
             'abs':  (c, t) => calc(c, t, Math.abs),
             'sqrt': (c, t) => calc(c, t, Math.sqrt),
             'log':  (c, t) => calc(c, t, Math.log),
-            'rand': (c, t) => c.stack.push({ val: Math.random(), ranges: [t] }),
             'pi':   (c, t) => c.stack.push({ val: Math.PI, ranges: [t] }),
+            'rand': (c, t) => calc(c, t, Math.random, true),
+            'irand':(c, t) => calc(c, t, (a, b) => Math.floor(a + Math.random() * (b - a)), true),
+            'rrand':(c, t) => calc(c, t, (a, b) => a + Math.random() * (b - a), true),
+            'beat': (c, t) => c.stack.push({ type: 'VAR', name: 'beat', ranges: [t] }),
+            't':    (c, t) => c.stack.push({ type: 'VAR', name: 'time', ranges: [t] }),
+            'tick': (c, t) => c.stack.push({ type: 'VAR', name: 'tick', ranges: [t] }),
         };
 
-        const calc = (c, opToken, fn) => {
+        const compile = (c, type) => {
+            if (c.isEval) {
+                if (c.stack.length) {
+                    const val = c.stack.pop();
+                    const text = `${format(val)} ${type.toLowerCase()}`;
+                    c.stack.push({ type: 'FMT', val: text });
+                }
+            } else {
+                createSound(c, type);
+            }
+        };
+
+        const format = (v) => {
+            if (v === undefined) return '';
+            if (v.type === 'FMT') return v.val;
+            if (v.type === 'OP' || v.type === 'VAR') return parseFloat(resolve(v, {beat:0, time:0, tick:0}).toFixed(3));
+            if (v.val !== undefined) return parseFloat(v.val.toFixed(3));
+            if (v.data) {
+                const m = {[SUB]:'[]', [CYC]:'<>', [CHO]:'()'}, w = m[v.type]||'[]';
+                return w[0] + v.data.map(format).join(' ') + w[1];
+            }
+            return '?';
+        };
+
+        const calc = (c, opToken, fn, isRand = false) => {
             if (c.stack.length < fn.length) return;
-            
+            if (fn.length === 0) {
+                c.stack.push({ type: 'OP', fn, args: [], ranges: [opToken], isRand });
+                return;
+            }
             const args = [];
             for(let i=0; i<fn.length; i++) args.unshift(c.stack.pop());
-            
             const getR = (x) => x.ranges || [x];
 
             const deep = (a, b) => {
                 if (b !== undefined) {
                     if (a.data) return { ...a, data: a.data.map(i => deep(i, b)) };
                     if (b.data) return { ...b, data: b.data.map(i => deep(a, i)) };
-                    
-                    return { 
-                        val: fn(a.val, b.val), 
-                        ranges: [opToken, ...getR(a), ...getR(b)]
-                    };
+                    return { type: 'OP', fn, args: [a, b], ranges: [opToken, ...getR(a), ...getR(b)], isRand };
                 }
-
                 if (a.data) return { ...a, data: a.data.map(i => deep(i)) };
-                
-                return { 
-                    val: fn(a.val), 
-                    ranges: [opToken, ...getR(a)]
-                };
+                return { type: 'OP', fn, args: [a], ranges: [opToken, ...getR(a)], isRand };
             };
-            
             c.stack.push(deep(args[0], args[1]));
         };
+
+        const resolve = (node, env) => {
+            if (!node) return 0;
+            if (node.val !== undefined) return node.val;
+            if (node.type === 'OP') {
+                if (node.args.length === 0) return node.fn();
+                const a = resolve(node.args[0], env);
+                const b = node.args[1] ? resolve(node.args[1], env) : undefined;
+                return node.fn(a, b);
+            }
+            if (node.type === 'VAR') return env[node.name] || 0;
+            return 0;
+        }
 
         const WAVES = {
             'SINE': (p) => Math.sin(p * 2 * Math.PI),
@@ -112,10 +151,18 @@
                 if (t.val === ';') break;
                 body.push(t);
             }
-            c.dict[name] = (ctx) => {
+            c.dict[name] = (ctx, caller) => { 
                 const savedTokens = ctx.tokens, savedPos = ctx.pos;
                 ctx.tokens = body; ctx.pos = 0;
+                const stackStart = ctx.stack.length;
                 run(ctx);
+                if (caller) {
+                    for(let i = stackStart; i < ctx.stack.length; i++) {
+                        const node = ctx.stack[i];
+                        if (!node.ranges) node.ranges = [node];
+                        node.ranges.push(caller);
+                    }
+                }
                 ctx.tokens = savedTokens; ctx.pos = savedPos;
             };
         }
@@ -133,23 +180,15 @@
 
         function createSound(c, type) {
             if (c.stack.length === 0) return;
-
             if (c.isMidi) {
                 const convert = (item) => {
-                    if (item.val !== undefined) {
-                        item.val = midiToFreq(item.val);
-                        return item;
-                    }
-                    if (item.data) {
-                        item.data = item.data.map(convert);
-                        return item;
-                    }
+                    if (item.val !== undefined) { item.val = midiToFreq(item.val); return item; }
+                    if (item.data) { item.data = item.data.map(convert); return item; }
                     return item;
                 }
                 c.stack = c.stack.map(convert);
                 c.isMidi = false; 
             }
-
             let pattern = c.stack.length > 1 ? { type: SUB, data: [...c.stack] } : c.stack[0];
             c.newSounds.push(new Sound(pattern, type));
             c.stack.length = 0;
@@ -160,7 +199,8 @@
             while (c.stack.length > 0) {
                 const item = c.stack.pop();
                 if (item === marker) {
-                    c.stack.push({ type: marker, data: tmp.reverse(), idx: 0 });
+                    const ranges = tmp.flatMap(x => x.ranges||[x]);
+                    c.stack.push({ type: marker, data: tmp.reverse(), ranges, idx: 0 });
                     return;
                 }
                 tmp.push(item);
@@ -174,7 +214,7 @@
                 this.render = WAVES[waveType];
                 this.signature = JSON.stringify(pattern, (k, v) => (k==='s'||k==='e'||k==='idx'||k==='ranges') ? undefined : v) + ':' + waveType;
                 this.phase = 0;
-                this.currFreqs = [];
+                this.currNodes = [];
                 this.currRanges = []; 
                 this.endTime = -1;
                 this.iter = this.makeIterator();
@@ -182,15 +222,25 @@
 
             *makeIterator() { while (true) yield* this.visit(this.pattern, 1.0); }
 
+            instantiate(node) {
+                if (!node) return node;
+                if (node.isRand) return { val: resolve(node, {beat:0, time:0, tick:0}), ranges: node.ranges };
+                if (node.args) return { ...node, args: node.args.map(n => this.instantiate(n)) };
+                return node;
+            }
+
             *visit(node, duration) {
                 const ranges = node.ranges || (node.val !== undefined ? [node] : []);
                 
-                if (node.val !== undefined) yield { freqs: [node.val], ranges: ranges, dur: duration };
-                
+                if (node.val !== undefined || node.type === 'OP' || node.type === 'VAR') {
+                    const activeNode = this.instantiate(node);
+                    yield { nodes: [activeNode], ranges: ranges, dur: duration };
+                }
                 else if (node?.type === CHO) {
                     const data = node.data.flatMap(n => this.collect(n));
+                    const activeNodes = data.map(n => this.instantiate(n));
                     yield { 
-                        freqs: data.map(d => d.val), 
+                        nodes: activeNodes, 
                         ranges: data.flatMap(d => d.ranges || [d]), 
                         dur: duration 
                     };
@@ -205,7 +255,7 @@
             }
 
             collect(node) {
-                if (node.val !== undefined) return [node];
+                if (node.val !== undefined || node.type === 'OP' || node.type === 'VAR') return [node];
                 if (node?.type === CHO || node?.type === SUB) return node.data.flatMap(n => this.collect(n));
                 if (node?.type === CYC) return this.collect(node.data[node.idx % node.data.length]);
                 return [];
@@ -219,12 +269,16 @@
                 this.pending = null; 
                 this.bpm = 120;
                 this.beats = 0;
-                this.port.onmessage = (e) => this.compile(e.data);
+                this.time = 0;
+                this.tick = 0;
+                this.port.onmessage = (e) => this.handleMsg(e.data);
             }
 
-            compile(text) {
+            handleMsg(msg) {
+                const isEval = msg.type === 'eval';
+                const text = isEval ? msg.code : msg;
                 const tokens = [];
-                const regex = /[^\s\[\]<>() :;]+|[\[\]<>() :;]/g;
+                const regex = /#.*|[^\s\[\]<>() :;]+|[\[\]<>() :;]/g;
                 let m;
                 while ((m = regex.exec(text)) !== null) {
                     if (!m[0].trim()) continue;
@@ -234,10 +288,17 @@
 
                 const ctx = {
                     tokens, pos: 0, stack: [], newSounds: [],
-                    dict: Object.assign({}, DICT), bpm: this.bpm
+                    dict: Object.assign({}, DICT), bpm: this.bpm,
+                    isEval, results: []
                 };
 
                 try { run(ctx); } catch(e) {} 
+
+                if (isEval) {
+                    const result = ctx.stack.map(format).join(' ');
+                    this.port.postMessage({ type: 'result', code: result });
+                    return;
+                }
 
                 if (ctx.stack.length === 0) {
                     this.pending = { sounds: ctx.newSounds, bpm: ctx.bpm };
@@ -268,40 +329,38 @@
                 }
 
                 let activeRanges = [];
+                const env = { beat: this.beats, time: this.time, tick: this.tick };
 
                 for (let i = 0; i < output.length; i++) {
                     this.beats += duration;
-                    let signal = 0;
+                    this.time += delta;
+                    this.tick++;
+                    
+                    env.beat = this.beats; 
+                    env.time = this.time; 
+                    env.tick = this.tick;
 
+                    let signal = 0;
                     this.sounds.forEach(v => {
                         if (v.endTime < 0) v.endTime = Math.floor(this.beats);
-
                         while (this.beats >= v.endTime) {
                             const result = v.iter.next();
-                            v.currFreqs = result.value.freqs;
+                            v.currNodes = result.value.nodes;
                             v.currRanges = result.value.ranges || [];
                             v.endTime += result.value.dur; 
                         }
-
-                        if (i === 0 && v.currRanges.length > 0) {
-                            activeRanges.push(...v.currRanges);
-                        }
-
-                        v.currFreqs.forEach(f => {
+                        if (i === 0 && v.currRanges.length > 0) activeRanges.push(...v.currRanges);
+                        v.currNodes.forEach(node => {
+                            const f = resolve(node, env);
                             if (f > 0) {
                                 v.phase += (f * delta);
                                 signal += v.render(v.phase);
                             }
                         });
                     });
-
                     output[i] = signal * 0.15;
                 }
-
-                if (activeRanges.length > 0) {
-                    this.port.postMessage(activeRanges);
-                }
-
+                if (activeRanges.length > 0) this.port.postMessage(activeRanges);
                 return true;
             }
         }
@@ -314,7 +373,25 @@
     const hl = document.getElementById('highlight');
     let ctx, node;
 
+    ed.addEventListener('keydown', e => {
+        if (e.shiftKey && e.key === 'Enter') { 
+            e.preventDefault(); 
+            let s = ed.selectionStart, eIdx = ed.selectionEnd;
+            if (s === eIdx) {
+                s = ed.value.lastIndexOf('\n', s - 1) + 1;
+                eIdx = ed.value.indexOf('\n', s);
+                if (eIdx === -1) eIdx = ed.value.length;
+            }
+            const raw = ed.value.substring(s, eIdx);
+            if (raw.trim() && node) {
+                ed._evalRange = { s, e: eIdx };
+                node.port.postMessage({ type: 'eval', code: raw });
+            }
+        }
+    });
+
     function renderHighlights(ranges) {
+        if (!Array.isArray(ranges)) return;
         const text = ed.value;
         let html = '';
         let lastPos = 0;
@@ -349,30 +426,37 @@
     });
 
     async function init() {
-        if (ctx) { 
-            ctx.resume(); 
-            return; 
-        }
-        
+        if (ctx) { ctx.resume(); return; }
         ctx = new (window.AudioContext || window.webkitAudioContext)();
         
         const template = document.getElementById('template');
         const code = template.content.getElementById('processor').textContent;
         const blob = new Blob([code], {type: 'application/javascript'});
-        await ctx.audioWorklet.addModule(URL.createObjectURL(blob));
-
-        node = new AudioWorkletNode(ctx, 'forth-proc');
-        node.connect(ctx.destination);
-        
-        node.port.onmessage = (e) => {
-            renderHighlights(e.data);
-        };
-
-        node.port.postMessage(ed.value);
+        try {
+            await ctx.audioWorklet.addModule(URL.createObjectURL(blob));
+            node = new AudioWorkletNode(ctx, 'forth-proc');
+            node.connect(ctx.destination);
+            
+            node.port.onmessage = (e) => {
+                if (e.data.type === 'result') {
+                    const r = ed._evalRange;
+                    if (r) {
+                        ed.setRangeText(e.data.code, r.s, r.e, 'end');
+                        node.port.postMessage(ed.value);
+                        hl.innerHTML = escapeHtml(ed.value).replace(/\n/g, '<br/>');
+                        ed._evalRange = null;
+                    }
+                } else {
+                    renderHighlights(e.data);
+                }
+            };
+            node.port.postMessage(ed.value);
+        } catch(e) {
+            console.error("AudioWorklet Error:", e);
+        }
     }
 
     document.addEventListener('click', init, {once:true});
-    
     hl.innerHTML = escapeHtml(ed.value).replace(/\n/g, '<br/>');
 </script>
 </body>

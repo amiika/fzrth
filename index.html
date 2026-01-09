@@ -1,30 +1,44 @@
 <!DOCTYPE html>
-<html>
 <head>
     <title>FZRTH</title>
     <style>
-        body { background: #000; color: #fb0; font-family: monospace; display: flex; flex-direction: column; height: 100vh; margin: 0; }
-        #editor { flex: 1; background: #000; color: #fb0; border: none; padding: 20px; font-size: 20px; outline: none; resize: none;}
+        :root { --bg: #000; --fg: #fb0; --hl: #d33; }
+        body { background: var(--bg); color: var(--fg); font-family: monospace; margin: 0; height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
         .header { font-size: 24px; padding: 10px; border-bottom: 1px solid #fb0; text-align: left; background: #111;}
+        .container { position: relative; flex: 1; display: flex; }
+        #editor { background: transparent; color: transparent; caret-color: #fff; z-index: 2; resize: none; }
+        #editor, #highlight { 
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            padding: 20px; font-size: 20px; line-height: 1.5;
+            white-space: pre-wrap; word-wrap: break-word;
+            box-sizing: border-box; border: none; outline: none; margin: 0;
+            font-family: 'Courier New', monospace;
+        }
+        #highlight { z-index: 1; pointer-events: none; }
+        .active { color: #fff; }
     </style>
 </head>
 <body>
     <div class="header">FZRTH</div>
-    <textarea id="editor" spellcheck="false">100 200 300 400 sine</textarea>
+        
+    <div class="container">
+        <div id="highlight"></div>
+        <textarea id="editor" spellcheck="false">100 200 400 800 [800 600] sine</textarea>
+    </div>
 
     <template id="template">
         <script id="processor">
 
-        const SUB = Symbol('SUB');
-        const CYC = Symbol('CYC');
-        const CHO = Symbol('CHO');
+        const SUB = 'SUB';
+        const CYC = 'CYC';
+        const CHO = 'CHO';
 
         const DICT = {
             'sine': (c) => createSound(c, 'SINE'),
             'tri':  (c) => createSound(c, 'TRI'),
             'saw':  (c) => createSound(c, 'SAW'),
             'sqr':  (c) => createSound(c, 'SQR'),
-            'bpm':  (c) => { if (c.stack.length > 0) c.bpm = c.stack.pop(); },
+            'bpm':  (c) => { if (c.stack.length > 0) c.bpm = c.stack.pop().val; },
             '[':    (c) => c.stack.push(SUB),
             ']':    (c) => closeGroup(c, SUB),
             '<':    (c) => c.stack.push(CYC),
@@ -43,11 +57,12 @@
         };
 
         function defineWord(c) {
-            const name = c.tokens[c.pos++];
+            const nameToken = c.tokens[c.pos++];
+            const name = nameToken.val;
             const body = [];
             while (c.pos < c.tokens.length) {
                 const t = c.tokens[c.pos++];
-                if (t === ';') break;
+                if (t.val === ';') break;
                 body.push(t);
             }
             c.dict[name] = (ctx) => {
@@ -61,27 +76,30 @@
         function run(c) {
             while (c.pos < c.tokens.length) {
                 const t = c.tokens[c.pos++];
-                const num = parseFloat(t);
-                if (!isNaN(num)) c.stack.push(num);
-                else if (c.dict[t]) c.dict[t](c);
+                const num = parseFloat(t.val);
+                if (!isNaN(num)) c.stack.push({ val: num, s: t.s, e: t.e });
+                else if (c.dict[t.val]) c.dict[t.val](c);
             }
         }
 
-        // MIDI to HZ: f = 440 * 2^((n-69)/12)
         const midiToFreq = (n) => n === 0 ? 0 : 440 * Math.pow(2, (n - 69) / 12);
 
         function createSound(c, type) {
             if (c.stack.length === 0) return;
 
             if (c.isMidi) {
-                c.stack = c.stack.map(item => {
-                    if (typeof item === 'object') {
+                const convert = (item) => {
+                    if (item.val !== undefined) {
                         item.val = midiToFreq(item.val);
                         return item;
                     }
-                    return midiToFreq(item);
-                });
-
+                    if (item.data) {
+                        item.data = item.data.map(convert);
+                        return item;
+                    }
+                    return item;
+                }
+                c.stack = c.stack.map(convert);
                 c.isMidi = false; 
             }
 
@@ -103,11 +121,14 @@
         }
 
         class Sound {
-            constructor(pattern, wave) {
+            constructor(pattern, waveType) {
                 this.pattern = pattern;
-                this.render = WAVES[wave];
+                this.waveType = waveType;
+                this.render = WAVES[waveType];
+                this.signature = JSON.stringify(pattern, (k, v) => (k==='s'||k==='e'||k==='idx') ? undefined : v) + ':' + waveType;
                 this.phase = 0;
                 this.currFreqs = [];
+                this.currRanges = []; 
                 this.endTime = -1;
                 this.iter = this.makeIterator();
             }
@@ -115,18 +136,29 @@
             *makeIterator() { while (true) yield* this.visit(this.pattern, 1.0); }
 
             *visit(node, duration) {
-                if (typeof node === 'number') yield { freqs: [node], dur: duration };
-                else if (node?.type === CHO) yield { freqs: node.data.flatMap(n => this.collectFreqs(n)), dur: duration };
+                if (node.val !== undefined) yield { freqs: [node.val], ranges: [node], dur: duration };
+                
+                else if (node?.type === CHO) {
+                    const data = node.data.flatMap(n => this.collect(n));
+                    yield { 
+                        freqs: data.map(d => d.val), 
+                        ranges: data, 
+                        dur: duration 
+                    };
+                }
                 else if (node?.type === SUB) {
                     const step = duration / node.data.length;
                     for (const item of node.data) yield* this.visit(item, step);
-                } else if (node?.type === CYC) yield* this.visit(node.data[node.idx++ % node.data.length], duration);
+                } 
+                else if (node?.type === CYC) {
+                    yield* this.visit(node.data[node.idx++ % node.data.length], duration);
+                }
             }
 
-            collectFreqs(node) {
-                if (typeof node === 'number') return [node];
-                if (node?.type === CHO || node?.type === SUB) return node.data.flatMap(n => this.collectFreqs(n));
-                if (node?.type === CYC) return this.collectFreqs(node.data[node.idx % node.data.length]);
+            collect(node) {
+                if (node.val !== undefined) return [node];
+                if (node?.type === CHO || node?.type === SUB) return node.data.flatMap(n => this.collect(n));
+                if (node?.type === CYC) return this.collect(node.data[node.idx % node.data.length]);
                 return [];
             }
         }
@@ -142,15 +174,20 @@
             }
 
             compile(text) {
-                const tokens = text.replace(/[\[\]<>() :;]/g, ' $& ')
-                .split(/\s+/).filter(x => x);
+                const tokens = [];
+                const regex = /[^\s\[\]<>() :;]+|[\[\]<>() :;]/g;
+                let m;
+                while ((m = regex.exec(text)) !== null) {
+                    if (!m[0].trim()) continue; 
+                    tokens.push({ val: m[0], s: m.index, e: m.index + m[0].length });
+                }
 
                 const ctx = {
                     tokens, pos: 0, stack: [], newSounds: [],
                     dict: Object.assign({}, DICT), bpm: this.bpm
                 };
 
-                run(ctx);
+                try { run(ctx); } catch(e) {} 
 
                 if (ctx.stack.length === 0) {
                     this.pending = { sounds: ctx.newSounds, bpm: ctx.bpm };
@@ -163,26 +200,44 @@
                 const delta = 1 / sampleRate;
                 const duration = (this.bpm / 60) * delta;
 
+                if (this.pending) {
+                    const nextSounds = this.pending.sounds;
+                    const claimed = new Set();
+                    nextSounds.forEach(newS => {
+                        const match = this.sounds.find(oldS => 
+                            oldS.signature === newS.signature && !claimed.has(oldS)
+                        );
+                        if (match) {
+                            claimed.add(match);
+                            newS.phase = match.phase;
+                        }
+                    });
+                    this.sounds = nextSounds;
+                    this.bpm = this.pending.bpm;
+                    this.pending = null;
+                }
+
+                let activeRanges = [];
+
                 for (let i = 0; i < output.length; i++) {
-                    const prevBeat = Math.floor(this.beats);
                     this.beats += duration;
-                    const nextBeat = Math.floor(this.beats);
-
-                    // Sync to beat changes
-                    if (this.pending && (nextBeat > prevBeat || this.sounds.length === 0)) {
-                        this.sounds = this.pending.sounds;
-                        this.bpm = this.pending.bpm;
-                        this.pending = null;
-                    }
-
                     let signal = 0;
+
                     this.sounds.forEach(v => {
-                        if (v.endTime < 0) v.endTime = this.beats;
+        
+                        if (v.endTime < 0) v.endTime = Math.floor(this.beats);
+
                         while (this.beats >= v.endTime) {
                             const result = v.iter.next();
                             v.currFreqs = result.value.freqs;
+                            v.currRanges = result.value.ranges || [];
                             v.endTime += result.value.dur; 
                         }
+
+                        if (i === 0 && v.currRanges.length > 0) {
+                            activeRanges.push(...v.currRanges);
+                        }
+
                         v.currFreqs.forEach(f => {
                             if (f > 0) {
                                 v.phase += (f * delta);
@@ -190,8 +245,14 @@
                             }
                         });
                     });
+
                     output[i] = signal * 0.15;
                 }
+
+                if (activeRanges.length > 0) {
+                    this.port.postMessage(activeRanges);
+                }
+
                 return true;
             }
         }
@@ -200,26 +261,70 @@
     </template>
 
 <script>
-    const editor = document.getElementById('editor');
-    let audioCtx;
-    let node;
+    const ed = document.getElementById('editor');
+    const hl = document.getElementById('highlight');
+    let ctx, node;
+
+    function renderHighlights(ranges) {
+        const text = ed.value;
+        let html = '';
+        let lastPos = 0;
+        
+        const unique = [];
+        const map = new Set();
+        ranges.forEach(r => {
+            const k = r.s + ":" + r.e;
+            if(!map.has(k)) { map.add(k); unique.push(r); }
+        });
+        unique.sort((a,b) => a.s - b.s);
+
+        unique.forEach(range => {
+            html += escapeHtml(text.substring(lastPos, range.s));
+            html += `<span class="active">${escapeHtml(text.substring(range.s, range.e))}</span>`;
+            lastPos = range.e;
+        });
+        html += escapeHtml(text.substring(lastPos));
+        
+        hl.innerHTML = html.replace(/\n/g, '<br/>') + (text.endsWith('\n') ? '<br/>&nbsp;' : '');
+    }
+
+    function escapeHtml(str) {
+        return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    }
+
+    ed.addEventListener('scroll', () => hl.scrollTop = ed.scrollTop);
+
+    ed.addEventListener('input', () => {
+        hl.innerHTML = escapeHtml(ed.value).replace(/\n/g, '<br/>');
+        if(node) node.port.postMessage(ed.value); 
+    });
 
     async function init() {
-        if (audioCtx) return;
-        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        if (ctx) { 
+            ctx.resume(); 
+            return; 
+        }
+        
+        ctx = new (window.AudioContext || window.webkitAudioContext)();
+        
         const template = document.getElementById('template');
         const code = template.content.getElementById('processor').textContent;
         const blob = new Blob([code], {type: 'application/javascript'});
-        const url = URL.createObjectURL(blob);
-        await audioCtx.audioWorklet.addModule(url);
+        await ctx.audioWorklet.addModule(URL.createObjectURL(blob));
 
-        node = new AudioWorkletNode(audioCtx, 'forth-proc');
-        node.connect(audioCtx.destination);
-        editor.addEventListener('input', () => node.port.postMessage(editor.value));
-        node.port.postMessage(editor.value);
+        node = new AudioWorkletNode(ctx, 'forth-proc');
+        node.connect(ctx.destination);
+        
+        node.port.onmessage = (e) => {
+            renderHighlights(e.data);
+        };
+
+        node.port.postMessage(ed.value);
     }
 
-    editor.addEventListener('click', init);
+    document.addEventListener('click', init, {once:true});
+    
+    hl.innerHTML = escapeHtml(ed.value).replace(/\n/g, '<br/>');
 </script>
 </body>
 </html>

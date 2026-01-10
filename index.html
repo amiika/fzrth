@@ -23,27 +23,35 @@
     <div class="container">
         <div id="highlight"></div>
         <textarea id="editor" spellcheck="false">
-: foo 100 200 irand ;
-: bar 100 foo irand ;
+300 bpm
+: foo 600 0 slide ;
+: bar 300 1000 irand ;
+: baz 300 bar irand ;
+: qux baz bar baz <100 200> - ;
+: bzz t baz bar irand * sin <bar baz> 1000 - *; 
+: brr t [10 <15 23>] 10 666 irand + * sin <24 65 24> 100 * * ;
 
-[100 150 foo bar] [foo foo foo] saw
-
-# Random cutoff filter effect
-t [10 <15 23>] 10 666 irand + * sin <24 65 24> 100 * * sine</textarea>
+0 foo 4 on sine
+(bar bar 100 + bar 200 +) 500 - sine
+qux tri
+bzz sqr
+brr sine</textarea>
     </div>
 
     <template id="template">
-        <script id="processor">
+       <script id="processor">
 
         const SUB = 'SUB';
         const CYC = 'CYC';
         const CHO = 'CHO';
+        const SEL = 'SEL';
 
         const DICT = {
             'sine': (c) => compile(c, 'SINE'),
             'tri':  (c) => compile(c, 'TRI'),
             'saw':  (c) => compile(c, 'SAW'),
             'sqr':  (c) => compile(c, 'SQR'),
+            'noise':(c) => compile(c, 'NOISE'),
             'bpm':  (c) => { if (c.stack.length > 0) c.bpm = resolve(c.stack.pop(), {beat:0}); },
             '[':    (c) => c.stack.push(SUB),
             ']':    (c) => closeGroup(c, SUB),
@@ -58,6 +66,18 @@ t [10 <15 23>] 10 666 irand + * sin <24 65 24> 100 * * sine</textarea>
             '*':    (c, t) => calc(c, t, (a, b) => a * b),
             '/':    (c, t) => calc(c, t, (a, b) => a / b),
             '%':    (c, t) => calc(c, t, (a, b) => a % b),
+            'and':    (c, t) => calc(c, t, (a, b) => a & b),
+            'or':    (c, t) => calc(c, t, (a, b) => a | b),
+            'xor':    (c, t) => calc(c, t, (a, b) => a ^ b),
+            'lshift':(c, t) => calc(c, t, (a, b) => a << b),
+            'rshift':(c, t) => calc(c, t, (a, b) => a >> b),
+            'shift': (c, t) => calc(c, t, (a, b) => b >= 0 ? a << b : a >> -b),
+            'eq':   (c, t) => calc(c, t, (a, b) => a === b ? 1 : 0),
+            'neq':  (c, t) => calc(c, t, (a, b) => a !== b ? 1 : 0),
+            'lt':   (c, t) => calc(c, t, (a, b) => a < b ? 1 : 0),
+            'gt':   (c, t) => calc(c, t, (a, b) => a > b ? 1 : 0),
+            'lte':  (c, t) => calc(c, t, (a, b) => a <= b ? 1 : 0),
+            'gte':  (c, t) => calc(c, t, (a, b) => a >= b ? 1 : 0),
             'pow':  (c, t) => calc(c, t, Math.pow),
             'min':  (c, t) => calc(c, t, Math.min),
             'max':  (c, t) => calc(c, t, Math.max),
@@ -67,14 +87,60 @@ t [10 <15 23>] 10 666 irand + * sin <24 65 24> 100 * * sine</textarea>
             'abs':  (c, t) => calc(c, t, Math.abs),
             'sqrt': (c, t) => calc(c, t, Math.sqrt),
             'log':  (c, t) => calc(c, t, Math.log),
+            'floor':(c, t) => calc(c, t, Math.floor),
+            'ceil': (c, t) => calc(c, t, Math.ceil),
+            'round':(c, t) => calc(c, t, Math.round),
             'pi':   (c, t) => c.stack.push({ val: Math.PI, ranges: [t] }),
             'rand': (c, t) => calc(c, t, Math.random, true),
             'irand':(c, t) => calc(c, t, (a, b) => Math.floor(a + Math.random() * (b - a)), true),
             'rrand':(c, t) => calc(c, t, (a, b) => a + Math.random() * (b - a), true),
             'beat': (c, t) => c.stack.push({ type: 'VAR', name: 'beat', ranges: [t] }),
-            't':    (c, t) => c.stack.push({ type: 'VAR', name: 'time', ranges: [t] }),
+            'time': (c, t) => c.stack.push({ type: 'VAR', name: 'time', ranges: [t] }),
             'tick': (c, t) => c.stack.push({ type: 'VAR', name: 'tick', ranges: [t] }),
+            'slide': (c, t) => calc(c, t, function(a, b) { return a + (b - a) * (arguments[2] % 1); }),
+            '?':    (c) => {
+                if (c.stack.length < 3) return;
+                const cond = c.stack.pop(); 
+                const t = c.stack.pop();    
+                const f = c.stack.pop();    
+                const ranges = [f, t, cond].flatMap(x => x.ranges || [x]);
+                c.stack.push({ type: SEL, cond, t, f, ranges });
+            },
+            'on': (c, tToken) => {
+                if (c.stack.length < 3) return;
+                const mod = c.stack.pop();
+                const tBranch = c.stack.pop();
+                const fBranch = c.stack.pop();
+                const condNode = { 
+                    type: 'OP', 
+                    fn: (m, _, b) => Math.floor(b) % m === 0 ? 1 : 0, 
+                    args: [mod], 
+                    ranges: [tToken] 
+                };
+                const ranges = [fBranch, tBranch, mod].flatMap(x => x.ranges || [x]);
+                c.stack.push({ type: SEL, cond: condNode, t: tBranch, f: fBranch, ranges });
+            },
+            'dup':  (c) => { if (c.stack.length) c.stack.push(c.stack[c.stack.length-1]); },
+            'pop': (c) => { if (c.stack.length) c.stack.pop(); },
+            'swap': (c) => { if (c.stack.length > 1) { const a = c.stack.pop(), b = c.stack.pop(); c.stack.push(a, b); } },
+            'pick': (c) => { 
+                    const n = resolve(c.stack.pop(), {beat:0}); 
+                    if (c.stack.length > n) c.stack.push(c.stack[c.stack.length - 1 - n]); 
+            },
         };
+
+        const SHORTHANDS = {
+            'b':  'beat',
+            's':  'time',
+            't':  'tick',
+            'rs': 'rshift',
+            'ls': 'lshift',
+            'sh': 'shift'
+        };
+
+        Object.keys(SHORTHANDS).forEach(k => {
+            if (DICT[SHORTHANDS[k]]) DICT[k] = DICT[SHORTHANDS[k]];
+        });
 
         const compile = (c, type) => {
             if (c.isEval) {
@@ -93,6 +159,7 @@ t [10 <15 23>] 10 666 irand + * sin <24 65 24> 100 * * sine</textarea>
             if (v.type === 'FMT') return v.val;
             if (v.type === 'OP' || v.type === 'VAR') return parseFloat(resolve(v, {beat:0, time:0, tick:0}).toFixed(3));
             if (v.val !== undefined) return parseFloat(v.val.toFixed(3));
+            if (v.type === SEL) return `[${format(v.f)}] [${format(v.t)}] ${format(v.cond)} ?`;
             if (v.data) {
                 const m = {[SUB]:'[]', [CYC]:'<>', [CHO]:'()'}, w = m[v.type]||'[]';
                 return w[0] + v.data.map(format).join(' ') + w[1];
@@ -109,7 +176,6 @@ t [10 <15 23>] 10 666 irand + * sin <24 65 24> 100 * * sine</textarea>
             const args = [];
             for(let i=0; i<fn.length; i++) args.unshift(c.stack.pop());
             const getR = (x) => x.ranges || [x];
-
             const deep = (a, b) => {
                 if (b !== undefined) {
                     if (a.data) return { ...a, data: a.data.map(i => deep(i, b)) };
@@ -129,7 +195,7 @@ t [10 <15 23>] 10 666 irand + * sin <24 65 24> 100 * * sine</textarea>
                 if (node.args.length === 0) return node.fn();
                 const a = resolve(node.args[0], env);
                 const b = node.args[1] ? resolve(node.args[1], env) : undefined;
-                return node.fn(a, b);
+                return node.fn(a, b, env.beat); 
             }
             if (node.type === 'VAR') return env[node.name] || 0;
             return 0;
@@ -139,7 +205,8 @@ t [10 <15 23>] 10 666 irand + * sin <24 65 24> 100 * * sine</textarea>
             'SINE': (p) => Math.sin(p * 2 * Math.PI),
             'TRI':  (p) => Math.abs((p % 1) * 4 - 2) - 1,
             'SAW':  (p) => (p % 1) * 2 - 1,
-            'SQR':  (p) => (p % 1) < 0.5 ? 0.5 : -0.5
+            'SQR':  (p) => (p % 1) < 0.5 ? 0.5 : -0.5,
+            'NOISE':(p) => Math.random() * 2 - 1
         };
 
         function defineWord(c) {
@@ -189,7 +256,9 @@ t [10 <15 23>] 10 666 irand + * sin <24 65 24> 100 * * sine</textarea>
                 c.stack = c.stack.map(convert);
                 c.isMidi = false; 
             }
-            let pattern = c.stack.length > 1 ? { type: SUB, data: [...c.stack] } : c.stack[0];
+            const s = c.stack.filter(x => typeof x !== 'string');
+            if (s.length === 0) { c.stack.length = 0; return; }
+            let pattern = s.length > 1 ? { type: SUB, data: s } : s[0];
             c.newSounds.push(new Sound(pattern, type));
             c.stack.length = 0;
         }
@@ -205,6 +274,7 @@ t [10 <15 23>] 10 666 irand + * sin <24 65 24> 100 * * sine</textarea>
                 }
                 tmp.push(item);
             }
+            while (tmp.length > 0) c.stack.push(tmp.pop());
         }
 
         class Sound {
@@ -213,11 +283,12 @@ t [10 <15 23>] 10 666 irand + * sin <24 65 24> 100 * * sine</textarea>
                 this.waveType = waveType;
                 this.render = WAVES[waveType];
                 this.signature = JSON.stringify(pattern, (k, v) => (k==='s'||k==='e'||k==='idx'||k==='ranges') ? undefined : v) + ':' + waveType;
-                this.phase = 0;
                 this.currNodes = [];
                 this.currRanges = []; 
                 this.endTime = -1;
+                this.env = { beat: 0, time: 0, tick: 0 }; 
                 this.iter = this.makeIterator();
+                this.voices = []; 
             }
 
             *makeIterator() { while (true) yield* this.visit(this.pattern, 1.0); }
@@ -252,12 +323,18 @@ t [10 <15 23>] 10 666 irand + * sin <24 65 24> 100 * * sine</textarea>
                 else if (node?.type === CYC) {
                     yield* this.visit(node.data[node.idx++ % node.data.length], duration);
                 }
+                else if (node?.type === SEL) {
+                    const condVal = resolve(node.cond, this.env);
+                    const branch = condVal !== 0 ? node.t : node.f;
+                    yield* this.visit(branch, duration);
+                }
             }
 
             collect(node) {
                 if (node.val !== undefined || node.type === 'OP' || node.type === 'VAR') return [node];
                 if (node?.type === CHO || node?.type === SUB) return node.data.flatMap(n => this.collect(n));
                 if (node?.type === CYC) return this.collect(node.data[node.idx % node.data.length]);
+                if (node?.type === SEL) return [...this.collect(node.t), ...this.collect(node.f)];
                 return [];
             }
         }
@@ -271,6 +348,9 @@ t [10 <15 23>] 10 666 irand + * sin <24 65 24> 100 * * sine</textarea>
                 this.beats = 0;
                 this.time = 0;
                 this.tick = 0;
+                const refRate = 44100;
+                this.kFreq = 0.05 * (refRate / sampleRate); 
+                this.kAmp = 0.05 * (refRate / sampleRate);  
                 this.port.onmessage = (e) => this.handleMsg(e.data);
             }
 
@@ -306,23 +386,32 @@ t [10 <15 23>] 10 666 irand + * sin <24 65 24> 100 * * sine</textarea>
             }
 
             process(inputs, outputs) {
-                const output = outputs[0][0];
-                if (!output) return true;
+                const output = outputs[0];
+                if (!output || !output.length) return true;
+                
                 const delta = 1 / sampleRate;
                 const duration = (this.bpm / 60) * delta;
-
+                const numChannels = output.length;
+                const bufferLen = output[0].length;
+                
                 if (this.pending) {
                     const nextSounds = this.pending.sounds;
                     const claimed = new Set();
+                    
                     nextSounds.forEach(newS => {
                         const match = this.sounds.find(oldS => 
                             oldS.signature === newS.signature && !claimed.has(oldS)
                         );
                         if (match) {
                             claimed.add(match);
-                            newS.phase = match.phase;
+                            newS.voices = match.voices;
+                            newS.endTime = match.endTime;
+                            newS.iter = match.iter;
+                            newS.currNodes = match.currNodes;
+                            newS.currRanges = match.currRanges;
                         }
                     });
+                    
                     this.sounds = nextSounds;
                     this.bpm = this.pending.bpm;
                     this.pending = null;
@@ -331,35 +420,62 @@ t [10 <15 23>] 10 666 irand + * sin <24 65 24> 100 * * sine</textarea>
                 let activeRanges = [];
                 const env = { beat: this.beats, time: this.time, tick: this.tick };
 
-                for (let i = 0; i < output.length; i++) {
+                for (let i = 0; i < bufferLen; i++) {
                     this.beats += duration;
                     this.time += delta;
                     this.tick++;
+                    env.beat = this.beats; env.time = this.time; env.tick = this.tick;
                     
-                    env.beat = this.beats; 
-                    env.time = this.time; 
-                    env.tick = this.tick;
-
                     let signal = 0;
                     this.sounds.forEach(v => {
+                        v.env = env; 
                         if (v.endTime < 0) v.endTime = Math.floor(this.beats);
+                        
                         while (this.beats >= v.endTime) {
                             const result = v.iter.next();
                             v.currNodes = result.value.nodes;
                             v.currRanges = result.value.ranges || [];
                             v.endTime += result.value.dur; 
                         }
+
                         if (i === 0 && v.currRanges.length > 0) activeRanges.push(...v.currRanges);
-                        v.currNodes.forEach(node => {
-                            const f = resolve(node, env);
-                            if (f > 0) {
-                                v.phase += (f * delta);
-                                signal += v.render(v.phase);
+                        
+                        while(v.voices.length < v.currNodes.length) {
+                            v.voices.push({ f: 0, a: 0, p: 0 });
+                        }
+
+                        v.currNodes.forEach((node, idx) => {
+                            const targetFreq = resolve(node, env);
+                            const voice = v.voices[idx];
+                            
+                            if (targetFreq > 0) {
+                                voice.f += (targetFreq - voice.f) * this.kFreq;
+                                voice.a += (1.0 - voice.a) * this.kAmp;
+                            } else {
+                                voice.a += (0.0 - voice.a) * this.kAmp;
+                            }
+
+                            if (voice.a > 0.001) {
+                                voice.p += (voice.f * delta);
+                                signal += v.render(voice.p) * voice.a;
                             }
                         });
+
+                        for(let k = v.currNodes.length; k < v.voices.length; k++) {
+                            const voice = v.voices[k];
+                            voice.a += (0.0 - voice.a) * this.kAmp;
+                            if (voice.a > 0.001) {
+                                voice.p += (voice.f * delta);
+                                signal += v.render(voice.p) * voice.a;
+                            }
+                        }
                     });
-                    output[i] = signal * 0.15;
+
+                    for (let c = 0; c < numChannels; c++) {
+                        output[c][i] = signal * 0.15;
+                    }
                 }
+                
                 if (activeRanges.length > 0) this.port.postMessage(activeRanges);
                 return true;
             }

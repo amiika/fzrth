@@ -31,6 +31,7 @@
 : bzz t baz bar irand * sin <bar baz> 1000 - *; 
 : brr t [10 <15 23>] 10 666 irand + * sin <24 65 24> 100 * * ;
 
+[[bd bd] <bd hh>] 0.25 speed play
 0 foo 4 on sine
 (bar bar 100 + bar 200 +) 500 - sine
 qux tri
@@ -41,10 +42,8 @@ brr sine</textarea>
     <template id="template">
        <script id="processor">
 
-        const SUB = 'SUB';
-        const CYC = 'CYC';
-        const CHO = 'CHO';
-        const SEL = 'SEL';
+        const SUB = 'SUB', CYC = 'CYC', CHO = 'CHO', SEL = 'SEL', SPEED = 'SPEED';
+        const MARKERS = [SUB, CYC, CHO, SEL, SPEED];
 
         const DICT = {
             'sine': (c) => compile(c, 'SINE'),
@@ -52,6 +51,8 @@ brr sine</textarea>
             'saw':  (c) => compile(c, 'SAW'),
             'sqr':  (c) => compile(c, 'SQR'),
             'noise':(c) => compile(c, 'NOISE'),
+            'play': (c) => compile(c, 'SMP'), 
+            'speed': (c, t) => modify(c, t, SPEED),
             'bpm':  (c) => { if (c.stack.length > 0) c.bpm = resolve(c.stack.pop(), {beat:0}); },
             '[':    (c) => c.stack.push(SUB),
             ']':    (c) => closeGroup(c, SUB),
@@ -142,6 +143,15 @@ brr sine</textarea>
             if (DICT[SHORTHANDS[k]]) DICT[k] = DICT[SHORTHANDS[k]];
         });
 
+        const modify = (c, tToken, type) => {
+            if (c.stack.length < 2) return;
+            const amount = c.stack.pop();
+            const data = c.stack.pop();
+            if (MARKERS.includes(data) || MARKERS.includes(amount)) return;
+            const ranges = [tToken, ...(amount.ranges||[amount]), ...(data.ranges||[data])];
+            c.stack.push({ type, amount, data, ranges });
+        };
+
         const compile = (c, type) => {
             if (c.isEval) {
                 if (c.stack.length) {
@@ -157,9 +167,11 @@ brr sine</textarea>
         const format = (v) => {
             if (v === undefined) return '';
             if (v.type === 'FMT') return v.val;
+            if (v.type === 'STR') return v.name + (v.idx ? ':'+v.idx : '');
             if (v.type === 'OP' || v.type === 'VAR') return parseFloat(resolve(v, {beat:0, time:0, tick:0}).toFixed(3));
             if (v.val !== undefined) return parseFloat(v.val.toFixed(3));
             if (v.type === SEL) return `[${format(v.f)}] [${format(v.t)}] ${format(v.cond)} ?`;
+            if (v.type === SPEED) return `[${format(v.data)}] ${format(v.amount)} speed`;
             if (v.data) {
                 const m = {[SUB]:'[]', [CYC]:'<>', [CHO]:'()'}, w = m[v.type]||'[]';
                 return w[0] + v.data.map(format).join(' ') + w[1];
@@ -169,10 +181,6 @@ brr sine</textarea>
 
         const calc = (c, opToken, fn, isRand = false) => {
             if (c.stack.length < fn.length) return;
-            if (fn.length === 0) {
-                c.stack.push({ type: 'OP', fn, args: [], ranges: [opToken], isRand });
-                return;
-            }
             const args = [];
             for(let i=0; i<fn.length; i++) args.unshift(c.stack.pop());
             const getR = (x) => x.ranges || [x];
@@ -191,22 +199,30 @@ brr sine</textarea>
         const resolve = (node, env) => {
             if (!node) return 0;
             if (node.val !== undefined) return node.val;
+            if (node.type === 'STR') return node;
             if (node.type === 'OP') {
                 if (node.args.length === 0) return node.fn();
                 const a = resolve(node.args[0], env);
                 const b = node.args[1] ? resolve(node.args[1], env) : undefined;
-                return node.fn(a, b, env.beat); 
+                const sa = (typeof a === 'number') ? a : 0;
+                const sb = (typeof b === 'number') ? b : 0;
+                return node.fn(sa, sb, env.beat); 
             }
             if (node.type === 'VAR') return env[node.name] || 0;
             return 0;
         }
 
-        const WAVES = {
+        const SOUNDS = {
             'SINE': (p) => Math.sin(p * 2 * Math.PI),
             'TRI':  (p) => Math.abs((p % 1) * 4 - 2) - 1,
             'SAW':  (p) => (p % 1) * 2 - 1,
             'SQR':  (p) => (p % 1) < 0.5 ? 0.5 : -0.5,
-            'NOISE':(p) => Math.random() * 2 - 1
+            'NOISE':(p) => Math.random() * 2 - 1,
+            'SMP': (p, buf) => { 
+                if (!buf) return 0;
+                const idx = Math.floor(p * buf.sr);
+                return (idx >= 0 && idx < buf.len) ? buf.data[idx] : 0;
+            }
         };
 
         function defineWord(c) {
@@ -238,8 +254,15 @@ brr sine</textarea>
             while (c.pos < c.tokens.length) {
                 const t = c.tokens[c.pos++];
                 const num = parseFloat(t.val);
-                if (!isNaN(num)) c.stack.push({ val: num, s: t.s, e: t.e });
+                if (!isNaN(num) && !t.val.includes(':')) c.stack.push({ val: num, s: t.s, e: t.e });
                 else if (c.dict[t.val]) c.dict[t.val](c, t);
+                else {
+                    const raw = t.val;
+                    const parts = raw.split(':');
+                    const name = parts[0];
+                    const idx = parts.length > 1 ? parseInt(parts[1]) : 0;
+                    c.stack.push({ type: 'STR', name, idx, s: t.s, e: t.e });
+                }
             }
         }
 
@@ -247,20 +270,22 @@ brr sine</textarea>
 
         function createSound(c, type) {
             if (c.stack.length === 0) return;
+            const s = c.stack.splice(0);
+            const valid = s.filter(x => typeof x === 'object');
+            if (valid.length === 0) return;
+
+            let pattern = valid.length > 1 ? { type: SUB, data: valid } : valid[0];
+            
             if (c.isMidi) {
                 const convert = (item) => {
                     if (item.val !== undefined) { item.val = midiToFreq(item.val); return item; }
                     if (item.data) { item.data = item.data.map(convert); return item; }
                     return item;
                 }
-                c.stack = c.stack.map(convert);
+                pattern = convert(pattern);
                 c.isMidi = false; 
             }
-            const s = c.stack.filter(x => typeof x !== 'string');
-            if (s.length === 0) { c.stack.length = 0; return; }
-            let pattern = s.length > 1 ? { type: SUB, data: s } : s[0];
             c.newSounds.push(new Sound(pattern, type));
-            c.stack.length = 0;
         }
 
         function closeGroup(c, marker) {
@@ -268,8 +293,9 @@ brr sine</textarea>
             while (c.stack.length > 0) {
                 const item = c.stack.pop();
                 if (item === marker) {
-                    const ranges = tmp.flatMap(x => x.ranges||[x]);
-                    c.stack.push({ type: marker, data: tmp.reverse(), ranges, idx: 0 });
+                    const data = tmp.filter(x => !MARKERS.includes(x)).reverse();
+                    const ranges = data.flatMap(x => x.ranges||[x]);
+                    c.stack.push({ type: marker, data, ranges, idx: 0 });
                     return;
                 }
                 tmp.push(item);
@@ -281,17 +307,26 @@ brr sine</textarea>
             constructor(pattern, waveType) {
                 this.pattern = pattern;
                 this.waveType = waveType;
-                this.render = WAVES[waveType];
-                this.signature = JSON.stringify(pattern, (k, v) => (k==='s'||k==='e'||k==='idx'||k==='ranges') ? undefined : v) + ':' + waveType;
+                this.render = SOUNDS[waveType];
+                this.signature = JSON.stringify(pattern, (k, v) => (k==='s'||k==='e'||k==='ranges') ? undefined : v) + ':' + waveType;
                 this.currNodes = [];
                 this.currRanges = []; 
                 this.endTime = -1;
                 this.env = { beat: 0, time: 0, tick: 0 }; 
                 this.iter = this.makeIterator();
                 this.voices = []; 
+                this.nextPattern = null;
             }
 
-            *makeIterator() { while (true) yield* this.visit(this.pattern, 1.0); }
+            *makeIterator() { 
+                while (true) {
+                    if (this.nextPattern) {
+                        this.pattern = this.nextPattern;
+                        this.nextPattern = null;
+                    }
+                    yield* this.visit(this.pattern, 1.0); 
+                }
+            }
 
             instantiate(node) {
                 if (!node) return node;
@@ -301,9 +336,9 @@ brr sine</textarea>
             }
 
             *visit(node, duration) {
-                const ranges = node.ranges || (node.val !== undefined ? [node] : []);
+                const ranges = node.ranges || (node.s !== undefined ? [node] : []);
                 
-                if (node.val !== undefined || node.type === 'OP' || node.type === 'VAR') {
+                if (node.val !== undefined || node.type === 'OP' || node.type === 'VAR' || node.type === 'STR') {
                     const activeNode = this.instantiate(node);
                     yield { nodes: [activeNode], ranges: ranges, dur: duration };
                 }
@@ -317,24 +352,46 @@ brr sine</textarea>
                     };
                 }
                 else if (node?.type === SUB) {
-                    const step = duration / node.data.length;
-                    for (const item of node.data) yield* this.visit(item, step);
+                    if (node.data.length === 0) {
+                        yield { nodes: [], ranges: [], dur: duration };
+                    } else {
+                        const step = duration / node.data.length;
+                        for (const item of node.data) yield* this.visit(item, step);
+                    }
                 } 
                 else if (node?.type === CYC) {
-                    yield* this.visit(node.data[node.idx++ % node.data.length], duration);
+                    if (node.data.length > 0) {
+                        yield* this.visit(node.data[node.idx++ % node.data.length], duration);
+                    } else {
+                        yield { nodes: [], ranges: [], dur: duration };
+                    }
                 }
                 else if (node?.type === SEL) {
                     const condVal = resolve(node.cond, this.env);
                     const branch = condVal !== 0 ? node.t : node.f;
                     yield* this.visit(branch, duration);
                 }
+                else if (node?.type === SPEED) {
+                    let valNode = node.amount;
+                    if (valNode.type === CYC) {
+                         if (valNode.data.length > 0) {
+                            valNode = valNode.data[valNode.idx++ % valNode.data.length];
+                         } else return;
+                    }
+                    const amt = resolve(valNode, this.env);
+                    let factor = amt;
+                    if (amt < 0) factor = 1 / Math.abs(amt); 
+                    if (factor === 0) factor = 1;
+                    yield* this.visit(node.data, duration / factor);
+                }
             }
 
             collect(node) {
-                if (node.val !== undefined || node.type === 'OP' || node.type === 'VAR') return [node];
+                if (node.val !== undefined || node.type === 'OP' || node.type === 'VAR' || node.type === 'STR') return [node];
                 if (node?.type === CHO || node?.type === SUB) return node.data.flatMap(n => this.collect(n));
                 if (node?.type === CYC) return this.collect(node.data[node.idx % node.data.length]);
                 if (node?.type === SEL) return [...this.collect(node.t), ...this.collect(node.f)];
+                if (node?.type === SPEED) return this.collect(node.data);
                 return [];
             }
         }
@@ -343,6 +400,8 @@ brr sine</textarea>
             constructor() {
                 super();
                 this.sounds = [];
+                this.samples = {};
+                this.requested = new Set();
                 this.pending = null; 
                 this.bpm = 120;
                 this.beats = 0;
@@ -352,13 +411,19 @@ brr sine</textarea>
                 this.kFreq = 0.05 * (refRate / sampleRate); 
                 this.kAmp = 0.05 * (refRate / sampleRate);  
                 this.port.onmessage = (e) => this.handleMsg(e.data);
+                this.env = { beat: 0, time: 0, tick: 0 };
             }
 
             handleMsg(msg) {
+                if (msg.type === 'setSample') {
+                    this.samples[msg.key] = { data: msg.buffer, sr: msg.sr, len: msg.buffer.length };
+                    return;
+                }
+
                 const isEval = msg.type === 'eval';
                 const text = isEval ? msg.code : msg;
                 const tokens = [];
-                const regex = /#.*|[^\s\[\]<>() :;]+|[\[\]<>() :;]/g;
+                const regex = /#.*|[^\s\[\]<>() ;]+|[\[\]<>() ;]/g;
                 let m;
                 while ((m = regex.exec(text)) !== null) {
                     if (!m[0].trim()) continue;
@@ -380,8 +445,25 @@ brr sine</textarea>
                     return;
                 }
 
-                if (ctx.stack.length === 0) {
-                    this.pending = { sounds: ctx.newSounds, bpm: ctx.bpm };
+                this.pending = { sounds: ctx.newSounds, bpm: ctx.bpm };
+
+                if (ctx.newSounds.length > 0) {
+                    const traverse = (n) => {
+                        if (n.type === 'STR') {
+                            const key = n.name + ':' + n.idx;
+                            if (!this.samples[key] && !this.requested.has(key)) {
+                                this.requested.add(key);
+                                this.port.postMessage({ type: 'reqSample', name: n.name, idx: n.idx });
+                            }
+                        } else if (n.data) {
+                             if (Array.isArray(n.data)) n.data.forEach(traverse);
+                             else traverse(n.data);
+                        }
+                        else if (n.t) { traverse(n.t); traverse(n.f); }
+                    };
+                    ctx.newSounds.forEach(s => {
+                        if(s.waveType === 'SMP') traverse(s.pattern);
+                    });
                 }
             }
 
@@ -390,9 +472,9 @@ brr sine</textarea>
                 if (!output || !output.length) return true;
                 
                 const delta = 1 / sampleRate;
-                const duration = (this.bpm / 60) * delta;
                 const numChannels = output.length;
                 const bufferLen = output[0].length;
+                const durationPerSample = (this.bpm / 60) * delta;
                 
                 if (this.pending) {
                     const nextSounds = this.pending.sounds;
@@ -400,81 +482,129 @@ brr sine</textarea>
                     
                     nextSounds.forEach(newS => {
                         const match = this.sounds.find(oldS => 
-                            oldS.signature === newS.signature && !claimed.has(oldS)
+                            oldS.waveType === newS.waveType && !claimed.has(oldS)
                         );
                         if (match) {
                             claimed.add(match);
-                            newS.voices = match.voices;
-                            newS.endTime = match.endTime;
-                            newS.iter = match.iter;
-                            newS.currNodes = match.currNodes;
-                            newS.currRanges = match.currRanges;
+                            match.nextPattern = newS.pattern;
+                            match.signature = newS.signature;
+                        } else {
+                            this.sounds.push(newS);
                         }
                     });
                     
-                    this.sounds = nextSounds;
+                    this.sounds = this.sounds.filter(s => claimed.has(s) || nextSounds.includes(s));
                     this.bpm = this.pending.bpm;
                     this.pending = null;
                 }
 
-                let activeRanges = [];
-                const env = { beat: this.beats, time: this.time, tick: this.tick };
-
-                for (let i = 0; i < bufferLen; i++) {
-                    this.beats += duration;
-                    this.time += delta;
-                    this.tick++;
-                    env.beat = this.beats; env.time = this.time; env.tick = this.tick;
+                const activeRanges = [];
+                
+                for (let sIdx = 0; sIdx < this.sounds.length; sIdx++) {
+                    const sound = this.sounds[sIdx];
+                    let localBeat = this.beats;
+                    let localTime = this.time;
+                    let localTick = this.tick;
                     
-                    let signal = 0;
-                    this.sounds.forEach(v => {
-                        v.env = env; 
-                        if (v.endTime < 0) v.endTime = Math.floor(this.beats);
-                        
-                        while (this.beats >= v.endTime) {
-                            const result = v.iter.next();
-                            v.currNodes = result.value.nodes;
-                            v.currRanges = result.value.ranges || [];
-                            v.endTime += result.value.dur; 
-                        }
+                    if (sound.endTime < 0) sound.endTime = Math.floor(localBeat);
 
-                        if (i === 0 && v.currRanges.length > 0) activeRanges.push(...v.currRanges);
-                        
-                        while(v.voices.length < v.currNodes.length) {
-                            v.voices.push({ f: 0, a: 0, p: 0 });
-                        }
+                    if (sound.currRanges && sound.currRanges.length > 0) {
+                         activeRanges.push(...sound.currRanges);
+                    }
 
-                        v.currNodes.forEach((node, idx) => {
-                            const targetFreq = resolve(node, env);
-                            const voice = v.voices[idx];
+                    let frame = 0;
+                    while (frame < bufferLen) {
+                        
+                        while (localBeat >= sound.endTime) {
+                            const result = sound.iter.next();
+                            if (result.done) {
+                                sound.endTime = Infinity;
+                                break;
+                            }
+                            sound.currNodes = result.value.nodes;
+                            sound.currRanges = result.value.ranges || [];
+                            sound.endTime += result.value.dur; 
                             
-                            if (targetFreq > 0) {
-                                voice.f += (targetFreq - voice.f) * this.kFreq;
-                                voice.a += (1.0 - voice.a) * this.kAmp;
-                            } else {
-                                voice.a += (0.0 - voice.a) * this.kAmp;
+                            if (frame === 0 && sound.currRanges.length > 0) {
+                                activeRanges.push(...sound.currRanges);
                             }
 
-                            if (voice.a > 0.001) {
-                                voice.p += (voice.f * delta);
-                                signal += v.render(voice.p) * voice.a;
-                            }
-                        });
-
-                        for(let k = v.currNodes.length; k < v.voices.length; k++) {
-                            const voice = v.voices[k];
-                            voice.a += (0.0 - voice.a) * this.kAmp;
-                            if (voice.a > 0.001) {
-                                voice.p += (voice.f * delta);
-                                signal += v.render(voice.p) * voice.a;
+                            for (let v = 0; v < sound.voices.length; v++) {
+                                sound.voices[v].p = 0;
+                                sound.voices[v].a = (sound.waveType === 'SMP' ? 1 : 0);
                             }
                         }
-                    });
 
-                    for (let c = 0; c < numChannels; c++) {
-                        output[c][i] = signal * 0.15;
+                        if (sound.endTime === Infinity) break;
+
+                        const samplesUntilEvent = Math.ceil((sound.endTime - localBeat) / durationPerSample);
+                        const samplesRemaining = bufferLen - frame;
+                        let count = samplesUntilEvent < samplesRemaining ? samplesUntilEvent : samplesRemaining;
+                        if (count < 1) count = 1;
+
+                        while(sound.voices.length < sound.currNodes.length) {
+                            const initAmp = sound.waveType === 'SMP' ? 1 : 0;
+                            sound.voices.push({ f: 0, a: initAmp, p: 0 });
+                        }
+
+                        const isSmp = sound.waveType === 'SMP';
+                        const voices = sound.voices;
+                        const nodes = sound.currNodes;
+                        const renderFn = sound.render;
+                        
+                        for (let k = 0; k < count; k++) {
+                            const i = frame + k;
+                            this.env.beat = localBeat;
+                            this.env.time = localTime;
+                            this.env.tick = localTick;
+                            
+                            let signal = 0;
+
+                            for (let vIdx = 0; vIdx < nodes.length; vIdx++) {
+                                const voice = voices[vIdx];
+                                const resolved = resolve(nodes[vIdx], this.env);
+
+                                if (isSmp) {
+                                    if (resolved && resolved.type === 'STR') {
+                                        const key = resolved.name + ':' + resolved.idx;
+                                        const buf = this.samples[key];
+                                        if (buf && voice.a > 0) {
+                                            signal += renderFn(voice.p, buf);
+                                            voice.p += delta; 
+                                        }
+                                    }
+                                } else {
+                                    const targetFreq = (typeof resolved === 'number') ? resolved : 0;
+                                    if (targetFreq > 0) {
+                                        voice.f += (targetFreq - voice.f) * this.kFreq;
+                                        voice.a += (1.0 - voice.a) * this.kAmp;
+                                    } else {
+                                        voice.a += (0.0 - voice.a) * this.kAmp;
+                                    }
+                                    if (voice.a > 0.001) {
+                                        voice.p += (voice.f * delta);
+                                        signal += renderFn(voice.p) * voice.a;
+                                    }
+                                }
+                            }
+
+                            const outSig = signal * 0.15;
+                            for (let c = 0; c < numChannels; c++) {
+                                output[c][i] += outSig;
+                            }
+
+                            localBeat += durationPerSample;
+                            localTime += delta;
+                            localTick++;
+                        }
+                        
+                        frame += count;
                     }
                 }
+
+                this.beats += bufferLen * durationPerSample;
+                this.time += bufferLen * delta;
+                this.tick += bufferLen;
                 
                 if (activeRanges.length > 0) this.port.postMessage(activeRanges);
                 return true;
@@ -488,6 +618,37 @@ brr sine</textarea>
     const ed = document.getElementById('editor');
     const hl = document.getElementById('highlight');
     let ctx, node;
+
+    const LOADER = {
+        map: null,
+        loadingMap: null,
+        base: 'https://raw.githubusercontent.com/tidalcycles/dirt-samples/master/',
+        async load(name, idx, port) {
+            if (!this.map) {
+                if (!this.loadingMap) {
+                    this.loadingMap = fetch(this.base+'strudel.json').then(r=>r.json());
+                }
+                try { this.map = await this.loadingMap; } catch(e){ return; }
+            }
+            const k = `${name}:${idx}`;
+            let entry = this.map[name];
+            if (!entry) return;
+            
+            let path = '';
+            if (Array.isArray(entry)) path = entry[idx]||entry[0];
+            else if (typeof entry === 'object') {
+                const all = Object.values(entry).flat();
+                path = all[idx]||all[0];
+            }
+            if (!path) return;
+            
+            try {
+                const ab = await (await fetch(this.base + path)).arrayBuffer();
+                const aud = await ctx.decodeAudioData(ab);
+                port.postMessage({type:'setSample', key:k, buffer:aud.getChannelData(0), sr:aud.sampleRate});
+            } catch(e) { console.log(e); }
+        }
+    };
 
     ed.addEventListener('keydown', e => {
         if (e.shiftKey && e.key === 'Enter') { 
@@ -562,6 +723,8 @@ brr sine</textarea>
                         hl.innerHTML = escapeHtml(ed.value).replace(/\n/g, '<br/>');
                         ed._evalRange = null;
                     }
+                } else if (e.data.type === 'reqSample') {
+                    LOADER.load(e.data.name, e.data.idx, node.port);
                 } else {
                     renderHighlights(e.data);
                 }

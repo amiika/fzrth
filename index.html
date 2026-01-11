@@ -529,9 +529,11 @@ brr sine</textarea>
                                 activeRanges.push(...sound.currRanges);
                             }
 
-                            for (let v = 0; v < sound.voices.length; v++) {
-                                sound.voices[v].p = 0;
-                                sound.voices[v].a = (sound.waveType === 'SMP' ? 1 : 0);
+                            if (sound.waveType === 'SMP') {
+                                for (let v = 0; v < sound.voices.length; v++) {
+                                    sound.voices[v].p = 0;
+                                    sound.voices[v].a = 1;
+                                }
                             }
                         }
 
